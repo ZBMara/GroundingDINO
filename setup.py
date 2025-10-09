@@ -23,32 +23,35 @@
 import glob
 import os
 import subprocess
-
-import subprocess
 import sys
 
-def install_torch():
-    try:
-        import torch
-    except ImportError:
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "torch"])
-
-# Call the function to ensure torch is installed
-install_torch()
-
-import torch
 from setuptools import find_packages, setup
-from torch.utils.cpp_extension import CUDA_HOME, CppExtension, CUDAExtension
 
 # groundingdino version info
 version = "0.1.0"
 package_name = "groundingdino"
 cwd = os.path.dirname(os.path.abspath(__file__))
 
+# Import torch conditionally - it's needed for building extensions but should be
+# declared as a build dependency in pyproject.toml
+try:
+    import torch
+    from torch.utils.cpp_extension import CUDA_HOME, CppExtension, CUDAExtension
+
+    TORCH_AVAILABLE = True
+except ImportError:
+    TORCH_AVAILABLE = False
+    CUDA_HOME = None
+    CppExtension = None
+    CUDAExtension = None
 
 sha = "Unknown"
 try:
-    sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=cwd).decode("ascii").strip()
+    sha = (
+        subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=cwd)
+        .decode("ascii")
+        .strip()
+    )
 except Exception:
     pass
 
@@ -62,12 +65,17 @@ def write_version_file():
 
 requirements = ["torch", "torchvision"]
 
-torch_ver = [int(x) for x in torch.__version__.split(".")[:2]]
-
 
 def get_extensions():
+    # If torch is not available, skip building extensions
+    if not TORCH_AVAILABLE:
+        print("Torch not available, skipping C++ extensions")
+        return None
+
     this_dir = os.path.dirname(os.path.abspath(__file__))
-    extensions_dir = os.path.join(this_dir, "groundingdino", "models", "GroundingDINO", "csrc")
+    extensions_dir = os.path.join(
+        this_dir, "groundingdino", "models", "GroundingDINO", "csrc"
+    )
 
     main_source = os.path.join(extensions_dir, "vision.cpp")
     sources = glob.glob(os.path.join(extensions_dir, "**", "*.cpp"))
@@ -82,7 +90,9 @@ def get_extensions():
     extra_compile_args = {"cxx": []}
     define_macros = []
 
-    if CUDA_HOME is not None and (torch.cuda.is_available() or "TORCH_CUDA_ARCH_LIST" in os.environ):
+    if CUDA_HOME is not None and (
+        torch.cuda.is_available() or "TORCH_CUDA_ARCH_LIST" in os.environ
+    ):
         print("Compiling with CUDA")
         extension = CUDAExtension
         sources += source_cuda
@@ -216,5 +226,7 @@ if __name__ == "__main__":
             )
         ),
         ext_modules=get_extensions(),
-        cmdclass={"build_ext": torch.utils.cpp_extension.BuildExtension},
+        cmdclass={"build_ext": torch.utils.cpp_extension.BuildExtension}
+        if TORCH_AVAILABLE
+        else {},
     )
