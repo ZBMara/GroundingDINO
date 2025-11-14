@@ -122,8 +122,12 @@ def get_extensions():
         rel_path = os.path.relpath(path, start=this_dir)
         return rel_path.replace(os.path.sep, "/")
 
-    sources = [_relative_source(path) for path in sources]
-    include_dirs = [_relative_source(extensions_dir)]
+    def _as_setup_path(path: str) -> str:
+        rel_path = os.path.relpath(path, start=this_dir)
+        return rel_path.replace(os.path.sep, "/")
+
+    sources = [_as_setup_path(path) for path in sources]
+    include_dirs = [_as_setup_path(extensions_dir)]
 
     ext_modules = [
         extension(
