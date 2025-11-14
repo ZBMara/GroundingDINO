@@ -22,36 +22,52 @@
 
 import glob
 import os
+import platform
 import subprocess
 import sys
 
 from setuptools import find_packages, setup
+
+
+def install_torch():
+    try:
+        import torch  # noqa: F401
+    except ImportError:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "torch"])
+
+
+IS_APPLE_SILICON = platform.system() == "Darwin" and platform.machine().lower().startswith("arm")
+
+TORCH_AVAILABLE = False
+CUDA_HOME = None
+CppExtension = None
+CUDAExtension = None
+torch = None  # type: ignore[assignment]
+
+if IS_APPLE_SILICON:
+    try:
+        import torch  # type: ignore[no-redef]
+        from torch.utils.cpp_extension import CUDA_HOME, CppExtension, CUDAExtension  # type: ignore[no-redef]
+
+        TORCH_AVAILABLE = True
+    except ImportError:
+        print("Torch not installed on Apple Silicon; skipping extension build.")
+else:
+    install_torch()
+    import torch  # type: ignore[no-redef]
+    from torch.utils.cpp_extension import CUDA_HOME, CppExtension, CUDAExtension  # type: ignore[no-redef]
+
+    TORCH_AVAILABLE = True
 
 # groundingdino version info
 version = "0.1.0"
 package_name = "groundingdino"
 cwd = os.path.dirname(os.path.abspath(__file__))
 
-# Import torch conditionally - it's needed for building extensions but should be
-# declared as a build dependency in pyproject.toml
-try:
-    import torch
-    from torch.utils.cpp_extension import CUDA_HOME, CppExtension, CUDAExtension
-
-    TORCH_AVAILABLE = True
-except ImportError:
-    TORCH_AVAILABLE = False
-    CUDA_HOME = None
-    CppExtension = None
-    CUDAExtension = None
 
 sha = "Unknown"
 try:
-    sha = (
-        subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=cwd)
-        .decode("ascii")
-        .strip()
-    )
+    sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=cwd).decode("ascii").strip()
 except Exception:
     pass
 
@@ -63,19 +79,13 @@ def write_version_file():
         # f.write(f"git_version = {repr(sha)}\n")
 
 
-requirements = ["torch", "torchvision"]
-
-
 def get_extensions():
-    # If torch is not available, skip building extensions
     if not TORCH_AVAILABLE:
-        print("Torch not available, skipping C++ extensions")
+        print("Torch not available; skipping C++ extensions")
         return None
 
     this_dir = os.path.dirname(os.path.abspath(__file__))
-    extensions_dir = os.path.join(
-        this_dir, "groundingdino", "models", "GroundingDINO", "csrc"
-    )
+    extensions_dir = os.path.join(this_dir, "groundingdino", "models", "GroundingDINO", "csrc")
 
     main_source = os.path.join(extensions_dir, "vision.cpp")
     sources = glob.glob(os.path.join(extensions_dir, "**", "*.cpp"))
@@ -90,9 +100,7 @@ def get_extensions():
     extra_compile_args = {"cxx": []}
     define_macros = []
 
-    if CUDA_HOME is not None and (
-        torch.cuda.is_available() or "TORCH_CUDA_ARCH_LIST" in os.environ
-    ):
+    if CUDA_HOME is not None and (torch.cuda.is_available() or "TORCH_CUDA_ARCH_LIST" in os.environ):
         print("Compiling with CUDA")
         extension = CUDAExtension
         sources += source_cuda
@@ -211,6 +219,10 @@ if __name__ == "__main__":
 
     write_version_file()
 
+    build_cmdclass = {}
+    if TORCH_AVAILABLE:
+        build_cmdclass = {"build_ext": torch.utils.cpp_extension.BuildExtension}
+
     setup(
         name="groundingdino",
         version="0.1.0",
@@ -226,7 +238,5 @@ if __name__ == "__main__":
             )
         ),
         ext_modules=get_extensions(),
-        cmdclass={"build_ext": torch.utils.cpp_extension.BuildExtension}
-        if TORCH_AVAILABLE
-        else {},
+        cmdclass=build_cmdclass,
     )
