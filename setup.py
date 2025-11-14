@@ -117,8 +117,13 @@ def get_extensions():
         extra_compile_args["nvcc"] = []
         return None
 
-    sources = [os.path.join(extensions_dir, s) for s in sources]
-    include_dirs = [extensions_dir]
+    # setuptools requires source paths to be relative to the project root
+    def _relative_source(path: str) -> str:
+        rel_path = os.path.relpath(path, start=this_dir)
+        return rel_path.replace(os.path.sep, "/")
+
+    sources = [_relative_source(path) for path in sources]
+    include_dirs = [_relative_source(extensions_dir)]
 
     ext_modules = [
         extension(
