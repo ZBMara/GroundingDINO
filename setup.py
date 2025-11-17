@@ -126,8 +126,10 @@ def get_extensions():
         rel_path = os.path.relpath(path, start=this_dir)
         return rel_path.replace(os.path.sep, "/")
 
-    sources = [_as_setup_path(path) for path in sources]
-    include_dirs = [_as_setup_path(extensions_dir)]
+    # Setuptools expects source paths relative to the setup.py directory.
+    sources = [os.path.relpath(src, this_dir) for src in sources]
+    sources = [src.replace(os.sep, "/") for src in sources]
+    include_dirs = [os.path.relpath(extensions_dir, this_dir)]
 
     ext_modules = [
         extension(
