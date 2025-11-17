@@ -169,10 +169,22 @@ def get_extensions():
         ]
     else:
         if cuda_available and not cuda_home_valid:
+            print("=" * 80)
+            print("WARNING: CUDA runtime detected but CUDA compiler (nvcc) not found!")
+            print(f"CUDA_HOME={CUDA_HOME if CUDA_HOME else 'Not set'}")
+            print("")
+            print("This usually means you're using a CUDA runtime-only Docker image.")
+            print("To build CUDA extensions, you need the full CUDA toolkit with nvcc.")
+            print("")
+            print("Solutions:")
+            print("  1. Use a CUDA devel image (e.g., nvidia/cuda:12.4.1-devel-ubuntu22.04)")
+            print("  2. Install CUDA toolkit: apt-get install cuda-toolkit-12-4")
+            print("  3. Set CUDA_HOME to your CUDA installation directory")
+            print("=" * 80)
             raise EnvironmentError(
-                f"CUDA is available but nvcc compiler not found. "
-                f"CUDA_HOME={CUDA_HOME if CUDA_HOME else 'Not set'}. "
-                f"Please ensure CUDA toolkit is properly installed or set CUDA_HOME environment variable."
+                f"CUDA runtime available but nvcc compiler not found. "
+                f"Cannot build CUDA extensions without CUDA toolkit. "
+                f"See above for solutions."
             )
         print("Compiling without CUDA")
         define_macros += [("WITH_HIP", None)]
