@@ -22,36 +22,104 @@
 
 import glob
 import os
+import platform
 import subprocess
 import sys
 
 from setuptools import find_packages, setup
+
+
+def install_torch():
+    try:
+        import torch  # noqa: F401
+    except ImportError:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "torch"])
+
+
+IS_APPLE_SILICON = platform.system() == "Darwin" and platform.machine().lower().startswith("arm")
+
+TORCH_AVAILABLE = False
+CUDA_HOME = None
+CppExtension = None
+CUDAExtension = None
+torch = None  # type: ignore[assignment]
+
+
+def find_cuda_home():
+    """Find CUDA installation directory with multiple fallback options."""
+    # First check environment variables
+    cuda_home = os.environ.get('CUDA_HOME') or os.environ.get('CUDA_PATH')
+    if cuda_home and os.path.exists(os.path.join(cuda_home, 'bin', 'nvcc')):
+        return cuda_home
+    
+    # Try to find nvcc in PATH
+    try:
+        nvcc_path = subprocess.check_output(['which', 'nvcc'], stderr=subprocess.DEVNULL).decode().strip()
+        if nvcc_path:
+            # Get parent directory of bin/nvcc
+            cuda_home = os.path.dirname(os.path.dirname(nvcc_path))
+            if os.path.exists(os.path.join(cuda_home, 'bin', 'nvcc')):
+                return cuda_home
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        pass
+    
+    # Try common CUDA installation paths
+    common_paths = [
+        '/usr/local/cuda',
+        '/usr/local/cuda-12.6',
+        '/usr/local/cuda-12.5',
+        '/usr/local/cuda-12.4',
+        '/usr/local/cuda-12.3',
+        '/usr/local/cuda-12.2',
+        '/usr/local/cuda-12.1',
+        '/usr/local/cuda-12.0',
+        '/usr/local/cuda-11.8',
+        '/usr/local/cuda-11.7',
+        '/usr/local/cuda-11.6',
+        '/opt/cuda',
+    ]
+    
+    for path in common_paths:
+        if os.path.exists(os.path.join(path, 'bin', 'nvcc')):
+            return path
+    
+    return None
+
+
+if IS_APPLE_SILICON:
+    try:
+        import torch  # type: ignore[no-redef]
+        from torch.utils.cpp_extension import CppExtension, CUDAExtension  # type: ignore[no-redef]
+
+        TORCH_AVAILABLE = True
+        CUDA_HOME = find_cuda_home()
+        if CUDA_HOME:
+            os.environ['CUDA_HOME'] = CUDA_HOME
+    except ImportError:
+        print("Torch not installed on Apple Silicon; skipping extension build.")
+else:
+    install_torch()
+    import torch  # type: ignore[no-redef]
+    from torch.utils.cpp_extension import CppExtension, CUDAExtension  # type: ignore[no-redef]
+
+    TORCH_AVAILABLE = True
+    # Find and set CUDA_HOME before torch tries to use it
+    CUDA_HOME = find_cuda_home()
+    if CUDA_HOME:
+        os.environ['CUDA_HOME'] = CUDA_HOME
+        print(f"Found CUDA at: {CUDA_HOME}")
+    else:
+        print("CUDA not found. Building without CUDA extensions.")
 
 # groundingdino version info
 version = "0.1.0"
 package_name = "groundingdino"
 cwd = os.path.dirname(os.path.abspath(__file__))
 
-# Import torch conditionally - it's needed for building extensions but should be
-# declared as a build dependency in pyproject.toml
-try:
-    import torch
-    from torch.utils.cpp_extension import CUDA_HOME, CppExtension, CUDAExtension
-
-    TORCH_AVAILABLE = True
-except ImportError:
-    TORCH_AVAILABLE = False
-    CUDA_HOME = None
-    CppExtension = None
-    CUDAExtension = None
 
 sha = "Unknown"
 try:
-    sha = (
-        subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=cwd)
-        .decode("ascii")
-        .strip()
-    )
+    sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=cwd).decode("ascii").strip()
 except Exception:
     pass
 
@@ -63,19 +131,13 @@ def write_version_file():
         # f.write(f"git_version = {repr(sha)}\n")
 
 
-requirements = ["torch", "torchvision"]
-
-
 def get_extensions():
-    # If torch is not available, skip building extensions
     if not TORCH_AVAILABLE:
-        print("Torch not available, skipping C++ extensions")
+        print("Torch not available; skipping C++ extensions")
         return None
 
     this_dir = os.path.dirname(os.path.abspath(__file__))
-    extensions_dir = os.path.join(
-        this_dir, "groundingdino", "models", "GroundingDINO", "csrc"
-    )
+    extensions_dir = os.path.join(this_dir, "groundingdino", "models", "GroundingDINO", "csrc")
 
     main_source = os.path.join(extensions_dir, "vision.cpp")
     sources = glob.glob(os.path.join(extensions_dir, "**", "*.cpp"))
@@ -90,10 +152,12 @@ def get_extensions():
     extra_compile_args = {"cxx": []}
     define_macros = []
 
-    if CUDA_HOME is not None and (
-        torch.cuda.is_available() or "TORCH_CUDA_ARCH_LIST" in os.environ
-    ):
-        print("Compiling with CUDA")
+    # Check if CUDA is available and properly configured
+    cuda_available = torch.cuda.is_available() or "TORCH_CUDA_ARCH_LIST" in os.environ
+    cuda_home_valid = CUDA_HOME is not None and os.path.exists(os.path.join(CUDA_HOME, 'bin', 'nvcc'))
+    
+    if cuda_available and cuda_home_valid:
+        print(f"Compiling with CUDA (CUDA_HOME={CUDA_HOME})")
         extension = CUDAExtension
         sources += source_cuda
         define_macros += [("WITH_CUDA", None)]
@@ -104,13 +168,42 @@ def get_extensions():
             "-D__CUDA_NO_HALF2_OPERATORS__",
         ]
     else:
+        if cuda_available and not cuda_home_valid:
+            print("=" * 80)
+            print("WARNING: CUDA runtime detected but CUDA compiler (nvcc) not found!")
+            print(f"CUDA_HOME={CUDA_HOME if CUDA_HOME else 'Not set'}")
+            print("")
+            print("This usually means you're using a CUDA runtime-only Docker image.")
+            print("To build CUDA extensions, you need the full CUDA toolkit with nvcc.")
+            print("")
+            print("Solutions:")
+            print("  1. Use a CUDA devel image (e.g., nvidia/cuda:12.4.1-devel-ubuntu22.04)")
+            print("  2. Install CUDA toolkit: apt-get install cuda-toolkit-12-4")
+            print("  3. Set CUDA_HOME to your CUDA installation directory")
+            print("=" * 80)
+            raise EnvironmentError(
+                f"CUDA runtime available but nvcc compiler not found. "
+                f"Cannot build CUDA extensions without CUDA toolkit. "
+                f"See above for solutions."
+            )
         print("Compiling without CUDA")
         define_macros += [("WITH_HIP", None)]
         extra_compile_args["nvcc"] = []
         return None
 
-    sources = [os.path.join(extensions_dir, s) for s in sources]
-    include_dirs = [extensions_dir]
+    # setuptools requires source paths to be relative to the project root
+    def _relative_source(path: str) -> str:
+        rel_path = os.path.relpath(path, start=this_dir)
+        return rel_path.replace(os.path.sep, "/")
+
+    def _as_setup_path(path: str) -> str:
+        rel_path = os.path.relpath(path, start=this_dir)
+        return rel_path.replace(os.path.sep, "/")
+
+    # Setuptools expects source paths relative to the setup.py directory.
+    sources = [os.path.relpath(src, this_dir) for src in sources]
+    sources = [src.replace(os.sep, "/") for src in sources]
+    include_dirs = [os.path.relpath(extensions_dir, this_dir)]
 
     ext_modules = [
         extension(
@@ -211,6 +304,10 @@ if __name__ == "__main__":
 
     write_version_file()
 
+    build_cmdclass = {}
+    if TORCH_AVAILABLE:
+        build_cmdclass = {"build_ext": torch.utils.cpp_extension.BuildExtension}
+
     setup(
         name="groundingdino",
         version="0.1.0",
@@ -226,7 +323,5 @@ if __name__ == "__main__":
             )
         ),
         ext_modules=get_extensions(),
-        cmdclass={"build_ext": torch.utils.cpp_extension.BuildExtension}
-        if TORCH_AVAILABLE
-        else {},
+        cmdclass=build_cmdclass,
     )
